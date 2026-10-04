@@ -1,4 +1,146 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>法律证据保管</title>
-<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}select,input,button{padding:8px;margin:4px}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.panel{border:1px solid #bbb;padding:16px;border-radius:8px}</style></head>
-<body><h1>法律证据保管与流转</h1><div class="panel"><select id="user"><option>custodian1</option><option>custodian2</option><option>analyst1</option><option>auditor1</option><option>outsider</option></select><input id="case" value="1"><button onclick="load()">生成保管报告</button></div><pre id="out"></pre>
-<script>async function load(){const r=await fetch(`/api/cases/${case.value}/report`,{headers:{"X-User-Id":user.value}});out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>法律证据保管与归档核验</title>
+<style>
+body{font:16px system-ui;max-width:1100px;margin:32px auto;padding:0 16px}
+select,input,button,textarea{padding:8px;margin:4px;font:inherit}
+pre{background:#f4f4f4;padding:12px;white-space:pre-wrap;overflow:auto}
+.panel{border:1px solid #bbb;padding:16px;border-radius:8px;margin-bottom:16px}
+table{border-collapse:collapse;width:100%;margin:8px 0}
+th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;font-size:14px}
+th{background:#eee}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px;color:#fff}
+.badge.verified{background:#2e7d32}
+.badge.missing{background:#c62828}
+.badge.damaged{background:#ef6c00}
+.badge.swapped_out{background:#6a1b9a}
+.badge.pending{background:#757575}
+.badge.completed{background:#2e7d32}
+.badge.failed{background:#c62828}
+.badge.processing{background:#ef6c00}
+.badge.active{background:#1565c0}
+.badge.void{background:#757575}
+.muted{color:#777;font-size:13px}
+</style>
+</head>
+<body>
+<h1>法律证据保管与归档核验</h1>
+
+<div class="panel">
+  <strong>身份</strong>
+  <select id="user">
+    <option>custodian1</option>
+    <option>custodian2</option>
+    <option>analyst1</option>
+    <option>auditor1</option>
+    <option>outsider</option>
+  </select>
+  <strong>案件 ID</strong>
+  <input id="case" value="1" style="width:80px">
+  <button onclick="loadReport()">生成保管报告</button>
+  <button onclick="loadArchive()">查看封存清单</button>
+</div>
+
+<div class="panel">
+  <h3>归档封存清单</h3>
+  <div class="muted">按阶段送存封存清单；同一清单并发提交只保存第一条；中断后重放补全未处理记录；权威状态一变即作废重算。</div>
+  <div id="archive"></div>
+  <h4>送存封存清单</h4>
+  <div class="muted">items 为 JSON 数组，每项含 evidence_id 或 sha256。</div>
+  <input id="mfNumber" placeholder="清单编号，如 MF-001" style="width:200px">
+  <textarea id="mfItems" rows="3" style="width:100%" placeholder='[{"evidence_id":1,"sha256":"...","label":"E-001"}]'></textarea>
+  <button onclick="submitManifest()">送存清单</button>
+  <div id="mfMsg" class="muted"></div>
+</div>
+
+<div class="panel">
+  <h3>保管报告</h3>
+  <pre id="out">点击「生成保管报告」查看按案件列出的父证据、子证据与重算结果。</pre>
+</div>
+
+<script>
+async function api(path, opts){
+  const r = await fetch(path, Object.assign({headers:{"X-User-Id":user.value}}, opts));
+  const data = await r.json();
+  if(!r.ok) throw new Error((data.error&&data.error.message)||r.status);
+  return data;
+}
+const esc = s => String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&","<":"<",">":">"}[c]));
+const badge = (cls,txt)=>`<span class="badge ${cls}">${txt}</span>`;
+
+async function loadReport(){
+  out.textContent = "加载中…";
+  try{
+    const r = await api(`/api/cases/${case.value}/report`);
+    out.textContent = JSON.stringify(r,null,2);
+  }catch(e){ out.textContent = "错误: "+e.message; }
+}
+
+async function loadArchive(){
+  archive.innerHTML = "加载中…";
+  try{
+    const list = await api(`/api/cases/${case.value}/archive`);
+    if(!list.length){ archive.innerHTML = '<div class="muted">暂无封存清单</div>'; return; }
+    let html = "";
+    for(const m of list){
+      const s = m.summary;
+      html += `<div style="border:1px solid #ddd;border-radius:6px;padding:10px;margin:8px 0">
+        <strong>${esc(m.manifest_number)}</strong> ${badge(m.status,m.status)}
+        <span class="muted">#${m.manifest_id} · 批次 ${m.batch_count}</span>
+        <div style="margin:6px 0">
+          ${badge("verified","核验通过 "+s.verified)}
+          ${badge("missing","缺件 "+s.missing)}
+          ${badge("damaged","损坏件 "+s.damaged)}
+          ${badge("swapped_out","换出 "+s.swapped_out)}
+          ${badge("pending","待处理 "+s.pending)}
+        </div>
+        <button onclick="viewManifest(${m.manifest_id})">查看批次与条目</button>
+        <button onclick="replayManifest(${m.manifest_id})">重放补全</button>
+        <div id="mf-${m.manifest_id}"></div>
+      </div>`;
+    }
+    archive.innerHTML = html;
+  }catch(e){ archive.innerHTML = '<div class="muted">错误: '+e.message+'</div>'; }
+}
+
+async function viewManifest(id){
+  const el = document.getElementById("mf-"+id);
+  el.innerHTML = "加载中…";
+  try{
+    const m = await api(`/api/archive/${id}`);
+    let batches = m.batches.map(b=>`<tr><td>${b.batch_number}</td><td>${badge(b.status,b.status)}</td><td class="muted">${esc(b.processed_at||"")}</td></tr>`).join("");
+    let items = m.items.map(it=>`<tr>
+      <td>${esc(it.label||"")}</td>
+      <td class="muted">${esc(it.sha256.slice(0,16))}…</td>
+      <td>${badge(it.result,it.result)}</td>
+      <td class="muted">${esc(it.reason)}</td>
+      <td class="muted">${esc(it.processed_at||"")}</td>
+    </tr>`).join("");
+    el.innerHTML = `<h4>批次</h4><table><tr><th>批次</th><th>状态</th><th>处理时间</th></tr>${batches}</table>
+      <h4>条目</h4><table><tr><th>标签</th><th>SHA-256</th><th>结果</th><th>处理原因</th><th>处理时间</th></tr>${items}</table>`;
+  }catch(e){ el.innerHTML = '<div class="muted">错误: '+e.message+'</div>'; }
+}
+
+async function replayManifest(id){
+  try{
+    const r = await api(`/api/archive/${id}/replay`,{method:"POST"});
+    alert("重放完成，补全处理 "+r.processed_count+" 条");
+    loadArchive();
+  }catch(e){ alert("重放失败: "+e.message); }
+}
+
+async function submitManifest(){
+  mfMsg.textContent = "送存中…";
+  try{
+    const items = JSON.parse(mfItems.value||"[]");
+    const r = await api(`/api/cases/${case.value}/archive`,{method:"POST",body:JSON.stringify({manifest_number:mfNumber.value,items})});
+    mfMsg.textContent = `已送存 ${r.manifest_number} 批次 ${r.batch_number}，${r.results.length} 条已处理`;
+    loadArchive();
+  }catch(e){ mfMsg.textContent = "错误: "+e.message; }
+}
+</script>
+</body>
+</html>
