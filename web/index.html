@@ -1,4 +1,111 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>法律证据保管</title>
-<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}select,input,button{padding:8px;margin:4px}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.panel{border:1px solid #bbb;padding:16px;border-radius:8px}</style></head>
-<body><h1>法律证据保管与流转</h1><div class="panel"><select id="user"><option>custodian1</option><option>custodian2</option><option>analyst1</option><option>auditor1</option><option>outsider</option></select><input id="case" value="1"><button onclick="load()">生成保管报告</button></div><pre id="out"></pre>
-<script>async function load(){const r=await fetch(`/api/cases/${case.value}/report`,{headers:{"X-User-Id":user.value}});out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<style>
+body{font:15px system-ui;max-width:1100px;margin:24px auto;padding:0 16px;color:#222}
+select,input,button,textarea{padding:7px;margin:3px;font:inherit}
+textarea{width:100%;box-sizing:border-box}
+pre{background:#f5f5f5;padding:12px;white-space:pre-wrap;border-radius:6px;max-height:420px;overflow:auto}
+.panel{border:1px solid #bbb;padding:14px;border-radius:8px;margin-bottom:16px}
+h2{font-size:18px;margin:0 0 10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid #ccc;padding:5px 7px;text-align:left;vertical-align:top}
+th{background:#eee}
+.badge{padding:1px 7px;border-radius:10px;color:#fff;font-size:12px;white-space:nowrap}
+.b-verified{background:#2e7d32}.b-missing{background:#b71c1c}
+.b-damaged{background:#e65100}.b-swapped_out{background:#6a1b9a}
+.b-pending,.b-received,.b-processing,.b-failed{background:#546e7a}
+.b-completed{background:#2e7d32}
+.muted{color:#666;font-size:12px}
+</style></head>
+<body>
+<h1>法律证据保管与流转</h1>
+<div class="panel">
+  操作身份：<select id="user">
+    <option>custodian1</option><option>custodian2</option><option>analyst1</option>
+    <option>auditor1</option><option>archive_mw</option><option>outsider</option>
+  </select>
+  案件：<input id="case" value="1" size="4">
+  <button onclick="loadReport()">生成案件报告（父/子证据 + 归档重算）</button>
+</div>
+<div class="panel">
+  <h2>归档封存清单</h2>
+  <button onclick="loadBatches()">查看批次状态</button>
+  批次号：<input id="batchNo" value="BATCH-001" size="12">
+  阶段：<input id="stage" value="stage-1-封存" size="14">
+  <button onclick="submitBatch()">中间件提交清单</button>
+  <button onclick="replayBatch()">按批次号重放</button>
+  <div class="muted">清单 JSON，例如 [{"custody_number":"EV-000001","expected_location":"A 区证物室","expected_sha256":""}]</div>
+  <textarea id="entries" rows="3">[{"custody_number":"EV-000001","expected_location":"","expected_sha256":""}]</textarea>
+  <div id="batches"></div>
+</div>
+<pre id="out"></pre>
+
+<script>
+const headers=()=>({"X-User-Id":user.value,"Content-Type":"application/json"});
+async function api(path,opts){const r=await fetch(path,opts);return {status:r.status,json:await r.json()}}
+function badge(text,cls){return `<span class="badge b-${cls}">${text}</span>`}
+function esc(s){return String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]))}
+
+async function loadReport(){
+  const {json}=await api(`/api/cases/${case.value}/report`,{headers:{"X-User-Id":user.value}});
+  out.textContent=JSON.stringify(json,null,2);
+  if(json.error) return;
+  let html=`<table><tr><th>保管号</th><th>标签</th><th>本案状态/保留</th><th>实物位置</th><th>父子关系</th><th>跨案件复用</th><th>校验</th></tr>`;
+  for(const e of json.evidence||[]){
+    const rel=e.parent_evidence_id?`子证据 ← #${e.parent_evidence_id}（${esc(e.derive_method)}）`
+      :e.is_parent?`父证据 → [${e.child_evidence_ids.join(", ")}]`:"—";
+    const x=e.cross_case_reuse||{};
+    const reuse=x.reused_here?`复用自案件 #${x.origin_case_id}`
+      :(x.other_registrations||[]).length?`他案复用：${x.other_registrations.map(r=>r.case_number).join(", ")}`:"首次入册";
+    html+=`<tr><td>${e.custody_number}</td><td>${esc(e.label)}</td>
+      <td>${e.status}${e.legal_hold?" / 法律保留":""}</td>
+      <td>${esc(e.current_location)||"—"}</td><td>${rel}</td><td>${reuse}</td>
+      <td>${e.hash_valid&&e.chain_valid?"✅":"❌"}</td></tr>`;
+  }
+  html+="</table>";
+  if(json.archive){
+    html+=`<p class="muted">归档：${json.archive.batch_count} 个批次；缺件 ${json.archive.missing_total}，
+      损坏 ${json.archive.damaged_total}，换出 ${json.archive.swapped_out_total}，累计作废重算 ${json.archive.recomputed_total} 轮</p>`;
+  }
+  batches.innerHTML=html;
+}
+
+async function loadBatches(){
+  const {json}=await api(`/api/cases/${case.value}/archive/batches`,{headers:{"X-User-Id":user.value}});
+  out.textContent=JSON.stringify(json,null,2);
+  if(json.error) return;
+  let html=`<table><tr><th>批次号</th><th>阶段</th><th>状态</th><th>统计</th><th>重算</th><th>明细/原因</th></tr>`;
+  for(const b of json.batches||[]){
+    const detail=await api(`/api/archive/batches/${b.id}`,{headers:{"X-User-Id":user.value}}).then(r=>r.json);
+    const rows=(detail.entries||[]).map(e=>
+      `<tr><td>${e.custody_number}</td><td>${badge(e.status,e.status)}</td>
+       <td>${e.previous_status?`原结论 ${e.previous_status} → ${e.status}（重算 ${e.recompute_count} 次）<br>`:""}${esc(e.reason)}</td></tr>`
+    ).join("");
+    html+=`<tr><td>${b.batch_number}</td><td>${esc(b.stage)}</td>
+      <td>${badge(b.status,b.status)}</td>
+      <td>通过 ${b.counts.verified} / 缺 ${b.counts.missing} / 损 ${b.counts.damaged} / 换出 ${b.counts.swapped_out} / 待 ${b.counts.pending}</td>
+      <td>${b.recompute_count}</td>
+      <td><table><tr><th>保管号</th><th>结果</th><th>处理原因</th></tr>${rows}</table></td></tr>`;
+  }
+  html+="</table>";
+  batches.innerHTML=html;
+}
+
+async function submitBatch(){
+  let entries;
+  try{entries=JSON.parse(document.getElementById("entries").value)}
+  catch(e){out.textContent="清单 JSON 解析失败: "+e;return}
+  const {status,json}=await api(`/api/cases/${case.value}/archive/batches`,{
+    method:"POST",headers:headers(),body:JSON.stringify({
+      batch_number:batchNo.value,stage:stage.value,entries
+    })});
+  out.textContent=`HTTP ${status}\n`+JSON.stringify(json,null,2);
+  loadBatches();
+}
+
+async function replayBatch(){
+  const {status,json}=await api(`/api/archive/batches/${encodeURIComponent(batchNo.value)}/replay`,{
+    method:"POST",headers:headers()});
+  out.textContent=`HTTP ${status}\n`+JSON.stringify(json,null,2);
+  loadBatches();
+}
+</script></body></html>
